@@ -59,10 +59,18 @@ class PPTConverter:
     def __init__(self, log_callback=None):
         self.log = log_callback or print
 
-    def convert(self, ppt_path, output_dir):
-        """转换PPT为PDF"""
+    def convert(self, ppt_path, output_dir=None):
+        """转换PPT为PDF
+
+        Args:
+            ppt_path: PPT文件路径
+            output_dir: 输出目录（可选，默认为PPT所在目录）
+        """
         ppt_path = Path(ppt_path)
-        output_dir = Path(output_dir)
+        if output_dir is None:
+            output_dir = ppt_path.parent
+        else:
+            output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
         if IS_WINDOWS:
@@ -79,7 +87,7 @@ class PPTConverter:
 
         temp_dir = tempfile.mkdtemp(prefix="ppt_pdf_")
         temp_pdf = Path(temp_dir) / f"{ppt_path.stem}.pdf"
-        final_pdf = output_dir / f"{ppt_path.stem}.pdf"
+        final_pdf = output_dir / f"{ppt_path.stem}-handout.pdf"
 
         try:
             # 启动PowerPoint
@@ -108,7 +116,7 @@ class PPTConverter:
 
     def _convert_macos(self, ppt_path, output_dir):
         """macOS平台转换 - 使用LibreOffice或手动转换"""
-        final_pdf = output_dir / f"{ppt_path.stem}.pdf"
+        final_pdf = output_dir / f"{ppt_path.stem}-handout.pdf"
 
         # 方法1: 尝试使用LibreOffice (更可靠)
         try:
@@ -199,8 +207,15 @@ class PPTConverter:
 
         return True
 
-    def _merge_pdf_2up(self, input_pdf, output_pdf):
-        """将PDF每2页合并为1页（上下排列）"""
+    def _merge_pdf_2up(self, input_pdf, output_pdf, add_border=True, scale=0.9):
+        """将PDF每2页合并为1页（上下排列），可选添加边框和缩放
+
+        Args:
+            input_pdf: 输入PDF路径
+            output_pdf: 输出PDF路径
+            add_border: 是否添加边框
+            scale: 缩放比例，默认0.9（90%），使幻灯片周围有10%留白
+        """
         reader = PdfReader(input_pdf)
         writer = PdfWriter()
 
@@ -214,13 +229,74 @@ class PPTConverter:
             height = float(page1.mediabox.height)
             new_page = writer.add_blank_page(width=width, height=height * 2)
 
-            new_page.merge_transformed_page(page1, Transformation().translate(0, height))
+            # 计算缩放后的尺寸和居中偏移
+            scaled_width = width * scale
+            scaled_height = height * scale
+            offset_x = (width - scaled_width) / 2
+            offset_y = (height - scaled_height) / 2
 
+            # 合并页面（缩放并居中）
+            # 上方幻灯片
+            new_page.merge_transformed_page(
+                page1,
+                Transformation().scale(scale).translate(offset_x, height + offset_y)
+            )
+            # 下方幻灯片
             if page2:
-                new_page.merge_transformed_page(page2, Transformation().translate(0, 0))
+                new_page.merge_transformed_page(
+                    page2,
+                    Transformation().scale(scale).translate(offset_x, offset_y)
+                )
+
+            # 添加边框（匹配缩放后的尺寸）
+            if add_border:
+                border_page = self._create_border_page(scaled_width, scaled_height)
+                # 上方边框
+                new_page.merge_transformed_page(
+                    border_page,
+                    Transformation().translate(offset_x, height + offset_y)
+                )
+                # 下方边框
+                if page2:
+                    new_page.merge_transformed_page(
+                        border_page,
+                        Transformation().translate(offset_x, offset_y)
+                    )
 
         with open(output_pdf, 'wb') as f:
             writer.write(f)
+
+    def _create_border_page(self, width, height, border_width=2):
+        """创建带边框的透明页面"""
+        from reportlab.pdfgen import canvas
+        from reportlab.lib.colors import black
+        import io
+
+        # 使用 reportlab 创建边框
+        packet = io.BytesIO()
+        c = canvas.Canvas(packet, pagesize=(width, height))
+        c.setStrokeColor(black)
+        c.setLineWidth(border_width)
+        c.rect(0, 0, width, height)
+        c.save()
+        packet.seek(0)
+
+        return PdfReader(packet).pages[0]
+
+    def compress_to_zip(self, pdf_files, zip_path):
+        """将PDF文件压缩到zip"""
+        import zipfile
+
+        zip_path = Path(zip_path)
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+            for pdf_file in pdf_files:
+                pdf_file = Path(pdf_file)
+                if pdf_file.exists():
+                    zf.write(pdf_file, pdf_file.name)
+                    self.log(f"  添加: {pdf_file.name}")
+
+        self.log(f"[ZIP] 创建: {zip_path.name}")
+        return str(zip_path)
 
 
 class PPTConverterGUI:
@@ -308,7 +384,6 @@ class PPTConverterGUI:
 
         ttk.Button(btn_frame, text="选择文件", command=self.select_files).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="选择文件夹", command=self.select_folder).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="上传PPTX", command=self.upload_pptx).pack(side=tk.LEFT, padx=5)
 
     def _setup_output_section(self, parent):
         """设置输出目录区域"""
@@ -407,15 +482,6 @@ class PPTConverterGUI:
         if folder:
             self.add_folder(folder)
 
-    def upload_pptx(self):
-        """上传PPTX文件（文件选择器）"""
-        files = filedialog.askopenfilenames(
-            title="上传PPTX文件",
-            filetypes=[("PowerPoint文件", "*.pptx"), ("所有文件", "*.*")]
-        )
-        if files:
-            self.add_files(files)
-
     def select_output(self):
         """选择输出目录"""
         folder = filedialog.askdirectory(title="选择输出目录")
@@ -424,10 +490,14 @@ class PPTConverterGUI:
 
     def add_files(self, filepaths):
         """添加文件到列表"""
+        first_dir = None  # 记录第一个文件的目录
         for filepath in filepaths:
             filepath = Path(filepath)
             if filepath.suffix.lower() in ['.ppt', '.pptx']:
                 if str(filepath) not in self.files:
+                    # 记录第一个有效文件的目录
+                    if first_dir is None:
+                        first_dir = str(filepath.parent)
                     # 添加到列表
                     self.files[str(filepath)] = {
                         'status': '待校验',
@@ -436,6 +506,10 @@ class PPTConverterGUI:
                     }
                     self.tree.insert("", tk.END, iid=str(filepath),
                                     values=(filepath.name, '待校验', '0%'))
+
+        # 自动同步输出目录为第一个文件所在目录
+        if first_dir:
+            self.output_dir.set(first_dir)
 
         # 自动校验新添加的文件
         self._validate_pending_files()
@@ -447,6 +521,7 @@ class PPTConverterGUI:
         ppt_files = [str(f) for f in ppt_files]
         if ppt_files:
             self.add_files(ppt_files)
+            # 输出目录已在 add_files 中自动设置
         else:
             messagebox.showinfo("提示", "该文件夹中没有PPT文件")
 
@@ -530,14 +605,6 @@ class PPTConverterGUI:
             messagebox.showwarning("警告", "请先添加PPT文件")
             return
 
-        if not self.output_dir.get():
-            messagebox.showwarning("警告", "请选择输出目录")
-            return
-
-        # 确保输出目录存在
-        output_path = Path(self.output_dir.get())
-        output_path.mkdir(parents=True, exist_ok=True)
-
         self.converting = True
         self.cancel_flag = False
         self.start_btn.configure(state=tk.DISABLED)
@@ -569,8 +636,13 @@ class PPTConverterGUI:
         success_count = 0
         error_count = 0
 
+        # 获取输出目录
+        output_dir = self.output_dir.get()
         self.log(f"开始转换 {total_files} 个文件...")
-        self.log(f"输出目录: {self.output_dir.get()}")
+        self.log(f"输出目录: {output_dir}")
+
+        # 用于存储所有成功转换的PDF（用于压缩）
+        success_pdfs = []
 
         for filepath in list(self.files.keys()):
             if self.cancel_flag:
@@ -580,23 +652,21 @@ class PPTConverterGUI:
             file_info = self.files[filepath]
             status = file_info['status']
 
-            # 跳过已成功的文件
             if status == '成功':
                 completed += 1
                 continue
 
-            # 更新状态为处理中
             self.root.after(0, lambda p=filepath: self._update_tree_item(p, '处理中', '...'))
 
             try:
-                result = self.converter.convert(filepath, self.output_dir.get())
+                # 使用用户指定的输出目录
+                result = self.converter.convert(filepath, output_dir)
 
                 if result:
                     success_count += 1
                     self.files[filepath]['status'] = '成功'
                     self.root.after(0, lambda p=filepath: self._update_tree_item(p, '成功', '100%'))
-                else:
-                    raise RuntimeError("转换失败")
+                    success_pdfs.append(result)
 
             except Exception as e:
                 error_count += 1
@@ -605,10 +675,16 @@ class PPTConverterGUI:
                 self.log(f"[ERR] {Path(filepath).name}: {e}")
 
             completed += 1
-
-            # 更新总进度
             progress = (completed / total_files) * 100
             self.root.after(0, lambda v=progress: self._update_progress(v))
+
+        # 转换完成后压缩（ZIP保存在输出目录）
+        if success_pdfs and not self.cancel_flag:
+            self.log("正在压缩...")
+            output_path = Path(output_dir)
+            dir_name = output_path.name
+            zip_path = output_path / f"{dir_name}.zip"
+            self.converter.compress_to_zip(success_pdfs, zip_path)
 
         self.log(f"转换完成: 成功 {success_count}, 失败 {error_count}")
 
