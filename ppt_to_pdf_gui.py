@@ -740,8 +740,8 @@ class PPTConverterGUI:
 
     def run(self):
         """运行主程序"""
-        # 设置默认输出目录
-        default_output = Path.home() / "Desktop" / "PDF输出"
+        # 设置默认输出目录为脚本所在路径
+        default_output = Path(__file__).parent
         self.output_dir.set(str(default_output))
 
         self.log("PPT to PDF 转换工具已启动")
